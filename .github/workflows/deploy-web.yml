@@ -1,0 +1,135 @@
+name: Deploy Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v4
+        with:
+          repository: l5769389/DicomVisionClient
+          ref: main
+          path: DicomVisionClient
+
+      - name: Checkout server
+        uses: actions/checkout@v4
+        with:
+          path: DicomVisionServer
+
+      - name: Deploy on server
+        env:
+          DEPLOY_HOST: ${{ secrets.JDCLOUD_DEPLOY_HOST || '111.228.1.213' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
+          DEPLOY_PASSWORD: ${{ secrets.JDCLOUD_DEPLOY_PASSWORD || secrets.DEPLOY_PASSWORD }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          PUBLIC_ORIGIN: ${{ secrets.JDCLOUD_PUBLIC_ORIGIN || 'https://dicom.zhaolin.online' }}
+          WEB_PORT: ${{ secrets.JDCLOUD_WEB_PORT || '127.0.0.1:18080' }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "${DEPLOY_PASSWORD:-}${DEPLOY_SSH_KEY:-}${DEPLOY_SSH_KEY_B64:-}"
+
+          CLIENT_ARCHIVE="/tmp/DicomVisionClient-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          SERVER_ARCHIVE="/tmp/DicomVisionServer-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='dist' \
+            --exclude='dist-*' \
+            --exclude='out' \
+            --exclude='build' \
+            --exclude='docs' \
+            --exclude='screenshots' \
+            --exclude='*.tsbuildinfo' \
+            -czf "$CLIENT_ARCHIVE" -C DicomVisionClient .
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='__pycache__' \
+            --exclude='.venv' \
+            --exclude='.uv-cache' \
+            --exclude='.pytest*' \
+            --exclude='tmp_pytest_basetemp' \
+            --exclude='dist' \
+            --exclude='build' \
+            --exclude='sample-data' \
+            -czf "$SERVER_ARCHIVE" -C DicomVisionServer .
+
+          SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=45 -o ConnectionAttempts=4 -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
+          if [ -n "${DEPLOY_PASSWORD:-}" ]; then
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+            export SSHPASS="$DEPLOY_PASSWORD"
+            SSH_CMD=(sshpass -e ssh "${SSH_OPTS[@]}" -o PreferredAuthentications=password -o PubkeyAuthentication=no)
+            SCP_CMD=(sshpass -e scp "${SSH_OPTS[@]}" -o PreferredAuthentications=password -o PubkeyAuthentication=no)
+          else
+            install -m 700 -d ~/.ssh
+            if [ -n "${DEPLOY_SSH_KEY_B64:-}" ]; then
+              printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+            else
+              printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+            fi
+            tr -d '\r' < ~/.ssh/deploy_key > ~/.ssh/deploy_key.tmp
+            mv ~/.ssh/deploy_key.tmp ~/.ssh/deploy_key
+            chmod 600 ~/.ssh/deploy_key
+            ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
+            SSH_CMD=(ssh "${SSH_OPTS[@]}" -i ~/.ssh/deploy_key)
+            SCP_CMD=(scp "${SSH_OPTS[@]}" -i ~/.ssh/deploy_key)
+          fi
+
+          retry_remote() {
+            local attempt
+
+            for attempt in 1 2 3 4; do
+              if "$@"; then
+                return 0
+              fi
+              echo "Remote command failed on attempt $attempt: $*" >&2
+              sleep $((attempt * 8))
+            done
+
+            return 1
+          }
+
+          REMOTE_SCRIPT_BASENAME="dicomvision-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          REMOTE_SCRIPT_LOCAL="/tmp/$REMOTE_SCRIPT_BASENAME"
+          REMOTE_SCRIPT="/tmp/$REMOTE_SCRIPT_BASENAME"
+
+          cat > "$REMOTE_SCRIPT_LOCAL" <<'EOF'
+          set -euo pipefail
+          exec 8>/var/lock/dicomvision-upload.lock
+          flock 8
+          ts="$(date +%Y%m%d%H%M%S)"
+          mkdir -p "$APP_DIR"
+          rm -rf "$APP_DIR/DicomVisionClient.next" "$APP_DIR/DicomVisionServer.next"
+          mkdir -p "$APP_DIR/DicomVisionClient.next" "$APP_DIR/DicomVisionServer.next"
+          tar -xzf "$CLIENT_ARCHIVE" -C "$APP_DIR/DicomVisionClient.next"
+          tar -xzf "$SERVER_ARCHIVE" -C "$APP_DIR/DicomVisionServer.next"
+          if [ -e "$APP_DIR/DicomVisionClient" ]; then
+            rm -rf "$APP_DIR/DicomVisionClient.previous"
+            mv "$APP_DIR/DicomVisionClient" "$APP_DIR/DicomVisionClient.previous"
+          fi
+          if [ -e "$APP_DIR/DicomVisionServer" ]; then
+            rm -rf "$APP_DIR/DicomVisionServer.previous"
+            mv "$APP_DIR/DicomVisionServer" "$APP_DIR/DicomVisionServer.previous"
+          fi
+          mv "$APP_DIR/DicomVisionClient.next" "$APP_DIR/DicomVisionClient"
+          mv "$APP_DIR/DicomVisionServer.next" "$APP_DIR/DicomVisionServer"
+          SKIP_GIT_SYNC=1 bash "$APP_DIR/DicomVisionClient/deploy/start-deploy.sh"
+          rm -f "$CLIENT_ARCHIVE" "$SERVER_ARCHIVE" "${REMOTE_SCRIPT:-}"
+          echo "Uploaded source deploy started at $ts"
+          EOF
+
+          retry_remote "${SCP_CMD[@]}" "$CLIENT_ARCHIVE" "$SERVER_ARCHIVE" "$REMOTE_SCRIPT_LOCAL" "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
+
+          retry_remote "${SSH_CMD[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_DIR='${DEPLOY_PATH:-/opt/dicomvision}' PUBLIC_ORIGIN='${PUBLIC_ORIGIN:-https://dicom.zhaolin.online}' WEB_PORT='${WEB_PORT:-127.0.0.1:18080}' CLIENT_ARCHIVE='$CLIENT_ARCHIVE' SERVER_ARCHIVE='$SERVER_ARCHIVE' REMOTE_SCRIPT='$REMOTE_SCRIPT' bash '$REMOTE_SCRIPT'"
