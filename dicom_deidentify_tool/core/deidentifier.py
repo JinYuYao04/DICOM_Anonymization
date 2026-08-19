@@ -35,41 +35,24 @@ class DicomDeidentifier:
     def set_action(self, tag: int, action: str):
         """
         设置单个标签的操作
-        
-        Args:
-            tag: 标签整数值
-            action: 操作类型 (DELETE 或 ANONYMIZE)
         """
         self.tag_actions[tag] = action
     
     def set_action_for_group(self, group: int, action: str):
         """
         设置整个组的操作
-        
-        Args:
-            group: 组号 (如 0x0010)
-            action: 操作类型
         """
         self.tag_actions[f"group_{group:04X}"] = action
     
     def set_action_for_private_tags(self, action: str):
         """
         设置私有标签的操作
-        
-        Args:
-            action: 操作类型
         """
         self.tag_actions["private_tags"] = action
     
     def get_action(self, tag: int) -> Optional[str]:
         """
         获取标签的操作类型
-        
-        Args:
-            tag: 标签整数值
-        
-        Returns:
-            操作类型，如果没有设置则返回None
         """
         # 先检查是否有具体标签的配置
         if tag in self.tag_actions:
@@ -104,12 +87,6 @@ class DicomDeidentifier:
     def should_process_tag(self, tag: int) -> bool:
         """
         判断标签是否需要处理
-        
-        Args:
-            tag: 标签整数值
-        
-        Returns:
-            是否需要处理
         """
         return self._is_patient_group_tag(tag) or self._is_private_tag(tag)
     
@@ -117,12 +94,6 @@ class DicomDeidentifier:
     def anonymize_value(value: str) -> str:
         """
         匿名化值：数字变0，其他字符变*
-        
-        Args:
-            value: 原始值
-        
-        Returns:
-            匿名化后的值
         """
         if not value:
             return ""
@@ -141,13 +112,6 @@ class DicomDeidentifier:
     def process_dataset(self, dataset: Dataset, recursive: bool = True) -> int:
         """
         处理数据集
-        
-        Args:
-            dataset: DICOM数据集
-            recursive: 是否递归处理序列
-        
-        Returns:
-            处理的标签数量
         """
         processed_count = 0
         tags_to_delete = []
@@ -202,13 +166,6 @@ class DicomDeidentifier:
     def deidentify_file(self, input_path: Path, output_path: Path) -> dict:
         """
         脱敏DICOM文件
-        
-        Args:
-            input_path: 输入文件路径
-            output_path: 输出文件路径
-        
-        Returns:
-            处理结果字典
         """
         try:
             # 读取DICOM文件
@@ -243,13 +200,6 @@ class DicomDeidentifier:
     def deidentify_folder(self, input_folder: Path, output_folder: Path) -> dict:
         """
         批量脱敏文件夹中的DICOM文件
-        
-        Args:
-            input_folder: 输入文件夹
-            output_folder: 输出文件夹
-        
-        Returns:
-            处理结果字典
         """
         results = {
             "total": 0,
@@ -298,12 +248,6 @@ class DicomDeidentifier:
         """
         获取标签信息
         
-        Args:
-            dataset: DICOM数据集
-            tag: 标签整数值
-        
-        Returns:
-            标签信息字典
         """
         tag_obj = Tag(tag)
         
